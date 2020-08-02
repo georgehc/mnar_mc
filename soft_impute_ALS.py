@@ -26,8 +26,8 @@ class SoftImpute_ALS:
         self._verbose = verbose
 
     def _bootstrap(self, k):
-        self._U = np.zeros((self._m,k))
-        self._V = np.zeros((self._n,k))
+        self._U = np.zeros((self._m, k))
+        self._V = np.zeros((self._n, k))
         self._Dsq = np.eye(k)
         self._U[:, :] = np.random.randn(self._m, k)
         self._U, _, _ = np.linalg.svd(self._U, False)
@@ -51,8 +51,8 @@ class SoftImpute_ALS:
         norm_B = self._Lambda * (np.linalg.norm(self._B, 'fro')) ** 2
         return cost + norm_A + norm_B
 
-
-    def fit(self, k=40, thresh=1e-05, Lambda=20, maxit=50, plot_conv=None, plot_time = None):
+    def fit(self, k=40, thresh=1e-05, Lambda=20, maxit=50, plot_conv=None,
+            plot_time=None):
         verbose = self._verbose
 
         if (k != self._k):
@@ -82,11 +82,11 @@ class SoftImpute_ALS:
             self._V_old[:, :] = self._V
             self._Dsq_old[:, :] = self._Dsq
 
-            #B step
+            # B step
             pattern = (self._R != 0)
             ABt = self._A.dot(self._B.T)
             proj_ABt = pattern.multiply(ABt)
-            self._X_star[:,:] = self._R.multiply(pattern) - proj_ABt + ABt
+            self._X_star[:, :] = self._R.multiply(pattern) - proj_ABt + ABt
             left_side = self._Dsq**2 + (self._Lambda * np.eye(k))
             right_side = np.dot(self._Dsq, np.dot(self._U.T, self._X_star))
             B_tilde = npla.solve(left_side, right_side)
@@ -94,16 +94,16 @@ class SoftImpute_ALS:
             self._Dsq[:, :] = np.diag(np.sqrt(D))
             self._B[:, :] = np.dot(self._V, self._Dsq)
 
-            #A step
+            # A step
             pattern = (self._R.T != 0)
             BAt = self._B.dot(self._A.T)
             proj_BAt = pattern.multiply(BAt)
-            self._Xt_star[:,:] = self._Rt.multiply(pattern) - proj_BAt + BAt
+            self._Xt_star[:, :] = self._Rt.multiply(pattern) - proj_BAt + BAt
             left_side = self._Dsq**2 + (self._Lambda * np.eye(k))
             right_side = np.dot(self._Dsq, np.dot(self._V.T, self._Xt_star))
             A_tilde = npla.solve(left_side, right_side)
 
-            self._U[:,:], d, _ = npla.svd(np.dot(A_tilde.T, self._Dsq), False)
+            self._U[:, :], d, _ = npla.svd(np.dot(A_tilde.T, self._Dsq), False)
             self._Dsq[:, :] = np.diag(np.sqrt(d))
             self._A[:, :] = np.dot(self._U, self._Dsq)
 
@@ -122,15 +122,14 @@ class SoftImpute_ALS:
             if plot_time is not None:
                 t.append(t1 - t0)
 
-
-        #Final Step: Output Solution
+        # Final Step: Output Solution
         M = self._X_star.dot(self._V)
-        self._U[:,:], d, v = npla.svd(M, False)
-        self._V[:,:] = np.dot(self._V, v)
+        self._U[:, :], d, v = npla.svd(M, False)
+        self._V[:, :] = np.dot(self._V, v)
         d = np.fmax(d - Lambda, 0)
-        self._Dsq = np.diag(d[d>0])
+        self._Dsq = np.diag(d[d > 0])
         k, _ = self._Dsq.shape
-        self._U = self._U[:,:k]
+        self._U = self._U[:, :k]
         self._Dsq = self._Dsq[:k]
         self._V = self._V[:, :k]
 
@@ -149,7 +148,6 @@ class SoftImpute_ALS:
             plt.xlabel('Iteration number')
         return
 
-
     def compute_rmse(self, R_test):
         prediction = self._U.dot(self._Dsq.dot(self._V.T))
         pattern = (R_test != 0)
@@ -157,7 +155,7 @@ class SoftImpute_ALS:
         return np.sqrt(s / R_test.nnz)
 
     def get_UVD(self):
-        #return copies so as to not corrupt internal structures
+        # return copies so as to not corrupt internal structures
         return (self._U.copy(), self._V.copy(), self._Dsq.copy())
 
 
@@ -176,8 +174,8 @@ class WeightedSoftImpute_ALS:
         self._verbose = verbose
 
     def _bootstrap(self, k):
-        self._U = np.zeros((self._m,k))
-        self._V = np.zeros((self._n,k))
+        self._U = np.zeros((self._m, k))
+        self._V = np.zeros((self._n, k))
         self._Dsq = np.eye(k)
         self._U[:, :] = np.random.randn(self._m, k)
         self._U, _, _ = np.linalg.svd(self._U, False)
@@ -202,8 +200,8 @@ class WeightedSoftImpute_ALS:
         norm_B = self._Lambda * (np.linalg.norm(self._B, 'fro')) ** 2
         return cost + norm_A + norm_B
 
-
-    def fit(self, k=40, thresh=1e-05, Lambda=20, maxit=50, plot_conv=None, plot_time = None):
+    def fit(self, k=40, thresh=1e-05, Lambda=20, maxit=50, plot_conv=None,
+            plot_time=None):
         verbose = self._verbose
 
         if (k != self._k):
@@ -233,12 +231,12 @@ class WeightedSoftImpute_ALS:
             self._V_old[:, :] = self._V
             self._Dsq_old[:, :] = self._Dsq
 
-            #B step
+            # B step
             pattern = (self._R != 0)
             ABt = self._A.dot(self._B.T)
             proj_ABt = pattern.multiply(ABt)
 
-            self._X_star[:,:] = self._R.multiply(pattern) - proj_ABt + ABt
+            self._X_star[:, :] = self._R.multiply(pattern) - proj_ABt + ABt
             B_tilde = np.zeros((k, self._n))
             diag_vec = np.diag(self._Dsq)
             UD = np.multiply(self._U, diag_vec)
@@ -253,11 +251,11 @@ class WeightedSoftImpute_ALS:
             self._Dsq[:, :] = np.diag(np.sqrt(D))
             self._B[:, :] = np.dot(self._V, self._Dsq)
 
-            #A step
+            # A step
             pattern = (self._R.T != 0)
             BAt = self._B.dot(self._A.T)
             proj_BAt = pattern.multiply(BAt)
-            self._Xt_star[:,:] = self._Rt.multiply(pattern) - proj_BAt + BAt
+            self._Xt_star[:, :] = self._Rt.multiply(pattern) - proj_BAt + BAt
             A_tilde = np.zeros((k, self._m))
             diag_vec = np.diag(self._Dsq)
             VD = np.multiply(self._V, diag_vec)
@@ -267,8 +265,8 @@ class WeightedSoftImpute_ALS:
                 right_side = np.dot(shared, self._Xt_star[:, j])
                 A_tilde[:, j] = npla.solve(left_side, right_side)
 
-            self._U[:,:], d, _ = npla.svd(np.multiply(A_tilde.T, diag_vec),
-                                          False)
+            self._U[:, :], d, _ = npla.svd(np.multiply(A_tilde.T, diag_vec),
+                                           False)
             self._Dsq[:, :] = np.diag(np.sqrt(d))
             self._A[:, :] = np.dot(self._U, self._Dsq)
 
@@ -286,15 +284,14 @@ class WeightedSoftImpute_ALS:
             if plot_time is not None:
                 t.append(t1 - t0)
 
-
-        #Final Step: Output Solution
+        # Final Step: Output Solution
         M = self._X_star.dot(self._V)
-        self._U[:,:], d, v = npla.svd(M, False)
-        self._V[:,:] = np.dot(self._V, v)
+        self._U[:, :], d, v = npla.svd(M, False)
+        self._V[:, :] = np.dot(self._V, v)
         d = np.fmax(d - Lambda, 0)
-        self._Dsq = np.diag(d[d>0])
+        self._Dsq = np.diag(d[d > 0])
         k, _ = self._Dsq.shape
-        self._U = self._U[:,:k]
+        self._U = self._U[:, :k]
         self._Dsq = self._Dsq[:k]
         self._V = self._V[:, :k]
 
@@ -313,7 +310,6 @@ class WeightedSoftImpute_ALS:
             plt.xlabel('Iteration number')
         return
 
-
     def compute_rmse(self, R_test):
         prediction = self._U.dot(self._Dsq.dot(self._V.T))
         pattern = (R_test != 0)
@@ -321,9 +317,8 @@ class WeightedSoftImpute_ALS:
         return np.sqrt(s / R_test.nnz)
 
     def get_UVD(self):
-        #return copies so as to not corrupt internal structures
+        # return copies so as to not corrupt internal structures
         return (self._U.copy(), self._V.copy(), self._Dsq.copy())
-
 
 
 def rmse_rank_lambda_plot(R_train, R_test, ranks_to_try, lambdas_to_try):
@@ -333,7 +328,7 @@ def rmse_rank_lambda_plot(R_train, R_test, ranks_to_try, lambdas_to_try):
         plot_name = "plots/rmse_Lambda_{}.jpg".format(l)
         for k in ranks_to_try:
             sals = SoftImpute_ALS(k, R_train)
-            sals.fit(Lambda = l, maxit = 100)
+            sals.fit(Lambda=l, maxit=100)
             train_rmse.append(sals.compute_rmse(R_train))
             test_rmse.append(sals.compute_rmse(R_test))
         plt.figure()
@@ -343,13 +338,15 @@ def rmse_rank_lambda_plot(R_train, R_test, ranks_to_try, lambdas_to_try):
         plt.ylabel('RMSE values with Lambda {}'.format(l))
         plt.savefig(plot_name)
 
+
 def text_to_CSR(filename, m, n):
-	raw_data = np.genfromtxt(filename, dtype=np.int32)
-	users = raw_data[:, 0] - 1
-	items = raw_data[:, 1] - 1
-	ratings = raw_data[:, 2].astype(np.float64)
-	R = sp.coo_matrix((ratings, (users, items)), shape=(m, n))
-	return R.tocsr()
+    raw_data = np.genfromtxt(filename, dtype=np.int32)
+    users = raw_data[:, 0] - 1
+    items = raw_data[:, 1] - 1
+    ratings = raw_data[:, 2].astype(np.float64)
+    R = sp.coo_matrix((ratings, (users, items)), shape=(m, n))
+    return R.tocsr()
+
 
 def main():
     # to run this, the movielens-100k dataset should be downloaded and placed
@@ -359,12 +356,14 @@ def main():
     R_train = text_to_CSR('ml-100k/ub.base', num_users, num_items)
     R_test = text_to_CSR('ml-100k/ub.test', num_users, num_items)
     sals = SoftImpute_ALS(40, R_train)
-    sals.fit(plot_conv="plots/conv_test.jpg", plot_time = "plots/time_test.jpg" )
+    sals.fit(plot_conv="plots/conv_test.jpg", plot_time="plots/time_test.jpg")
     print(sals.compute_rmse(R_test))
 
-    lambdas_to_try = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 90, 100, 110, 120]
+    lambdas_to_try = \
+        [5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 90, 100, 110, 120]
     ranks_to_try = [3, 5, 10, 15, 20, 25, 30, 35, 40, 50]
     rmse_rank_lambda_plot(R_train, R_test, ranks_to_try, lambdas_to_try)
+
 
 if __name__ == "__main__":
     main()

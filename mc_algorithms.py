@@ -34,23 +34,31 @@ that can weight the different matrix entries in the squared loss for ratings
 Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (weima@cmu.edu)
 
 This code uses the following library (on top of Anaconda Python 3.7):
-- apgpy: https://github.com/bodono/apgpy
+- copt: pip install -U copt
 
 References:
 
     T. Tony Cai and Wen-Xin Zhou. Matrix completion via max-norm constrained
-    optimization.Elec-tronic Journal of Statistics, 10(1):1493–1525, 2016.
+    optimization. Electronic Journal of Statistics, 10(1):1493–1525, 2016.
 
     Mark A. Davenport, Yaniv Plan, Ewout Van Den Berg, and Mary Wootters.
-    1-bit matrix completion.Information and Inference, 3(3):189–223, 2014
+    1-bit matrix completion. Information and Inference, 3(3):189–223, 2014
+
+    Jason D. Lee, Ben Recht, Nathan Srebro, Joel Tropp, and Ruslan R.
+    Salakhutdinov. Practical large-scale optimization for max-norm
+    regularization. In Advances in Neural Information Processing Systems,
+    pages 1297-1305, 2010.
 
     Nathan Srebro and Ruslan R. Salakhutdinov. Collaborative filtering in a
     non-uniform world: Learning with the weighted trace norm. In Advances in
     Neural Information Processing Systems, pages 2056–2064, 2010.
 """
 import numpy as np
-import apgpy
+from copt import minimize_proximal_gradient, minimize_three_split
+from scipy.linalg import svd
+from scipy.optimize import minimize
 from sklearn.utils.extmath import randomized_svd
+from nuc_shrinkage_helper import shrinkage_singular_values
 
 
 def std_logistic_function(x):
@@ -73,121 +81,130 @@ def grad_mod_logistic_function(x, gamma, one_minus_logistic_gamma):
     return z / (1 + z)**2 + one_minus_logistic_gamma / (2*gamma)
 
 
-def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma, max_rank=None,
-                              apg_max_iter=100, apg_eps=1e-12,
-                              apg_use_restart=True):
+def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma,
+                              max_rank=None, opt_max_iter=2000,
+                              opt_eps=1e-6, shrinkage_search_eps=1e-8,
+                              max_num_proj_iter=1000):
     # parameters are the same as in the paper; if `max_rank` is set to None,
     # then exact SVD is used
     m = M.shape[0]
     n = M.shape[1]
     tau_sqrt_mn = tau * np.sqrt(m*n)
 
-    def prox(_A, t):
+    def prox_nuc_norm(_A, t=1):
+        # nuclear norm projection
         _A = _A.reshape(m, n)
-
-        # project so nuclear norm is at most tau*sqrt(m*n)
         if max_rank is None:
-            U, S, VT = np.linalg.svd(_A, full_matrices=False)
+            U, S, VT = svd(_A, full_matrices=False)
+            if S.sum() > tau_sqrt_mn:
+                S = shrinkage_singular_values(S.astype(np.float64),
+                                              tau_sqrt_mn,
+                                              shrinkage_search_eps)
+                _A = np.dot(U * S, VT)
         else:
             U, S, VT = randomized_svd(_A, max_rank)
-        nuclear_norm = np.sum(S)
-        if nuclear_norm > tau_sqrt_mn:
-            S *= tau_sqrt_mn / nuclear_norm
+            if S.sum() > tau_sqrt_mn:
+                S = shrinkage_singular_values(S.astype(np.float64),
+                                              tau_sqrt_mn,
+                                              shrinkage_search_eps)
             _A = np.dot(U * S, VT)
-
-        # clip matrix entries with absolute value greater than gamma
-        mask = np.abs(_A) > gamma
-        if mask.sum() > 0:
-            _A[mask] = np.sign(_A[mask]) * gamma
-
         return _A.flatten()
+
+    def prox_entrywise_max_norm(_A, t=1):
+        return np.clip(_A, -gamma, gamma)
 
     M_one_mask = (M == 1)
     M_zero_mask = (M == 0)
-    def grad(_A):
-        _A = _A.reshape(m, n)
+
+    def f(_A, return_gradient=True):
+        _A = np.clip(_A.reshape(m, n), -gamma, gamma)
+
+        loss = -(np.log(link(_A[M_one_mask])).sum()
+                 + np.log(1 - link(_A[M_zero_mask])).sum())
+
+        if not return_gradient:
+            return loss
 
         grad = np.zeros((m, n))
         grad[M_one_mask] = -link_gradient(_A[M_one_mask])/link(_A[M_one_mask])
         grad[M_zero_mask] = \
             link_gradient(_A[M_zero_mask])/(1 - link(_A[M_zero_mask]))
+        return loss, grad.flatten()
 
-        return grad.flatten()
-
-    A_hat = apgpy.solve(grad, prox, np.zeros(m*n),
-                        max_iters=apg_max_iter,
-                        eps=apg_eps,
-                        use_gra=True,
-                        use_restart=apg_use_restart,
-                        quiet=True)
+    A_hat = minimize_three_split(f, np.zeros(m*n, dtype=np.float64),
+                                 prox_entrywise_max_norm, prox_nuc_norm,
+                                 max_iter=opt_max_iter, tol=opt_eps).x
     P_hat = link(A_hat.reshape(m, n))
     return P_hat
 
 
 def one_bit_MC_mod_fully_observed(M, link, link_gradient, tau, gamma,
-                                  max_rank=None, apg_max_iter=100,
-                                  apg_eps=1e-12, apg_use_restart=True,
-                                  phi=None):
+                                  max_rank=None, opt_max_iter=2000,
+                                  opt_eps=1e-6, phi=None,
+                                  shrinkage_search_eps=1e-8,
+                                  max_num_proj_iter=1000):
     # parameters are the same as in the paper; if `max_rank` is set to None,
     # then exact SVD is used
     m = M.shape[0]
     n = M.shape[1]
     tau_sqrt_mn = tau * np.sqrt(m*n)
-    M_zero_mask = (M == 0)
+
     if phi is None:
         phi = .95 * gamma
 
-    def prox(_A, t):
+    def prox_nuc_norm(_A, t=1):
+        # nuclear norm projection
         _A = _A.reshape(m, n)
-
-        # project so nuclear norm is at most tau*sqrt(m*n)
         if max_rank is None:
-            U, S, VT = np.linalg.svd(_A, full_matrices=False)
+            U, S, VT = svd(_A, full_matrices=False)
+            if S.sum() > tau_sqrt_mn:
+                S = shrinkage_singular_values(S.astype(np.float64),
+                                              tau_sqrt_mn,
+                                              shrinkage_search_eps)
+                _A = np.dot(U * S, VT)
         else:
             U, S, VT = randomized_svd(_A, max_rank)
-        nuclear_norm = np.sum(S)
-        if nuclear_norm > tau_sqrt_mn:
-            S *= tau_sqrt_mn / nuclear_norm
+            if S.sum() > tau_sqrt_mn:
+                S = shrinkage_singular_values(S.astype(np.float64),
+                                              tau_sqrt_mn,
+                                              shrinkage_search_eps)
             _A = np.dot(U * S, VT)
+        return _A.flatten()
 
-        # clip matrix entries with absolute value greater than gamma
-        mask = np.abs(_A) > gamma
-        if mask.sum() > 0:
-            _A[mask] = np.sign(_A[mask]) * gamma
+    M_zero_mask = (M == 0)
 
-        mask = _A[M_zero_mask] > phi
-        if mask.sum() > 0:
-            _A[M_zero_mask][mask] = phi
-
+    def prox_entrywise_max_norm_mod(_A, t=1):
+        _A = np.clip(_A, -gamma, gamma).reshape(m, n)
+        _A[M_zero_mask] = np.minimum(_A[M_zero_mask], phi)
         return _A.flatten()
 
     M_one_mask = (M == 1)
-    def grad(_A):
-        _A = _A.reshape(m, n)
+
+    def f(_A, return_gradient=True):
+        _A = np.clip(_A.reshape(m, n), -gamma, gamma)
+        _A[M_zero_mask] = np.minimum(_A[M_zero_mask], phi)
+
+        loss = -(np.log(link(_A[M_one_mask])).sum()
+                 + np.log(1 - link(_A[M_zero_mask])).sum())
+
+        if not return_gradient:
+            return loss
 
         grad = np.zeros((m, n))
-        grad[M_one_mask] = -link_gradient(_A[M_one_mask])/ \
-            link(np.maximum(_A[M_one_mask], -gamma))
+        grad[M_one_mask] = -link_gradient(_A[M_one_mask])/link(_A[M_one_mask])
         grad[M_zero_mask] = \
-            link_gradient(_A[M_zero_mask])/ \
-            (1 - link(np.minimum(_A[M_zero_mask], phi)))
+            link_gradient(_A[M_zero_mask])/(1 - link(_A[M_zero_mask]))
+        return loss, grad.flatten()
 
-        return grad.flatten()
-
-    A_hat = apgpy.solve(grad, prox, np.zeros(m*n),
-                        max_iters=apg_max_iter,
-                        eps=apg_eps,
-                        use_gra=True,
-                        use_restart=apg_use_restart,
-                        quiet=True)
+    A_hat = minimize_three_split(f, np.zeros(m*n, dtype=np.float64),
+                                 prox_entrywise_max_norm_mod, prox_nuc_norm,
+                                 max_iter=opt_max_iter, tol=opt_eps).x
     P_hat = link(A_hat.reshape(m, n))
     return P_hat
 
 
-def weighted_softimpute(X, M, W, lmbda, max_rank=None,
-                        min_value=None, max_value=None,
-                        apg_max_iter=100, apg_eps=1e-6,
-                        apg_use_restart=True):
+def weighted_softimpute(X, M, W, lmbda, min_value=None, max_value=None,
+                        max_rank=None, opt_max_iter=100, opt_eps=1e-6):
     # if `max_rank` is set to None, then exact SVD is used
     m = X.shape[0]
     n = X.shape[1]
@@ -197,318 +214,173 @@ def weighted_softimpute(X, M, W, lmbda, max_rank=None,
 
         # singular value shrinkage
         if max_rank is None:
-            U, S, VT = np.linalg.svd(Z, full_matrices=False)
+            U, S, VT = svd(Z, full_matrices=False)
         else:
             U, S, VT = randomized_svd(Z, max_rank)
         S = np.maximum(S - lmbda*t, 0)
         Z = np.dot(U * S, VT)
-
-        # clip values
-        if min_value is not None:
-            mask = Z < min_value
-            if mask.sum() > 0:
-                Z[mask] = min_value
-        if max_value is not None:
-            mask = Z > max_value
-            if mask.sum() > 0:
-                Z[mask] = max_value
-
         return Z.flatten()
 
     M_one_mask = (M == 1)
     masked_weights = W[M_one_mask]
     masked_X = X[M_one_mask]
-    def grad(Z):
-        grad = np.zeros((m, n))
-        grad[M_one_mask] = (Z.reshape(m, n)[M_one_mask] - masked_X) * masked_weights
-        return grad.flatten()
 
-    X_hat = apgpy.solve(grad, prox, np.zeros(m*n),
-                        max_iters=apg_max_iter,
-                        eps=apg_eps,
-                        use_gra=True,
-                        use_restart=apg_use_restart,
-                        quiet=True).reshape((m, n))
+    def f(Z, return_gradient=True):
+        Z = Z.reshape(m, n)
+
+        diff = (Z[M_one_mask] - masked_X) * np.sqrt(masked_weights)
+        loss = 1/2 * np.inner(diff, diff) \
+            + lmbda * np.linalg.norm(Z, ord='nuc')
+
+        if not return_gradient:
+            return loss
+
+        grad = np.zeros((m, n))
+        grad[M_one_mask] = diff
+        return loss, grad.flatten()
+
+    if min_value is not None or max_value is not None:
+        def min_max_value_proj(Z, t):
+            return np.clip(Z, min_value, max_value)
+        X_hat = minimize_three_split(f, np.zeros(m*n, dtype=np.float64),
+                                     prox, min_max_value_proj,
+                                     max_iter=opt_max_iter, tol=opt_eps).x
+    else:
+        X_hat = minimize_proximal_gradient(f, np.zeros(m*n, dtype=np.float64),
+                                           prox, jac=True,
+                                           max_iter=opt_max_iter,
+                                           tol=opt_eps).x
+    return X_hat.reshape(m, n)
+
+
+def approx_doubly_weighted_trace_norm(X, M, W, n_components, lmbda,
+                                      min_value=None, max_value=None,
+                                      opt_max_iter=100, opt_eps=1e-6,
+                                      random_state=None,
+                                      trace_norm_weighting=True):
+    m, n = X.shape
+
+    if random_state is None:
+        rng = np.random.RandomState()
+    elif type(random_state) == np.random.RandomState:
+        rng = random_state
+    else:
+        rng = np.random.RandomState(random_state)
+
+    if trace_norm_weighting:
+        total = float(np.sum(X))
+        row_weights = np.sum(X, axis=1) / total * m
+        col_weights = np.sum(X, axis=0) / total * n
+    else:
+        row_weights = np.ones(m)
+        col_weights = np.ones(n)
+
+    U = rng.rand(m, n_components)
+    V = rng.rand(n, n_components)
+    m_times_n_components = m * n_components
+
+    def f(_UV, return_gradient=True):
+        U = _UV[:m_times_n_components].reshape(m, n_components)
+        V = _UV[m_times_n_components:].reshape(n, n_components)
+        X_hat_tmp = U.dot(V.T)
+        diff = (X_hat_tmp - X) * M * np.sqrt(W)
+
+        U_weighted = np.dot(np.diag(np.sqrt(row_weights)), U)
+        V_weighted = np.dot(np.diag(np.sqrt(col_weights)), V)
+
+        # by default, np.linalg.norm for matrices is Frobenius norm
+        loss = (np.linalg.norm(diff)**2
+                + lmbda * (np.linalg.norm(U_weighted)**2
+                           + np.linalg.norm(V_weighted)**2)) / 2
+
+        if not return_gradient:
+            return loss
+
+        grad_U = np.dot(diff, V) + lmbda * U_weighted
+        grad_V = np.dot(diff.T, U) + lmbda * V_weighted
+        grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
+        return loss, grad_UV
+
+    if min_value is not None or max_value is not None:
+        def min_max_value_proj(Z, t):
+            return np.clip(Z, min_value, max_value)
+        _UV_hat = minimize_proximal_gradient(f,
+                                             np.concatenate([U.flatten(),
+                                                             V.flatten()]),
+                                             min_max_value_proj, jac=True,
+                                             max_iter=opt_max_iter,
+                                             tol=opt_eps).x
+    else:
+        _UV_hat = \
+            minimize(f, np.concatenate([U.flatten(), V.flatten()]),
+                     method='L-BFGS-B', jac=True,
+                     options={'maxiter': opt_max_iter},
+                     tol=opt_eps).x
+    U = _UV_hat[:m_times_n_components].reshape(m, n_components)
+    V = _UV_hat[m_times_n_components:].reshape(n, n_components)
+    X_hat = U.dot(V.T)
     return X_hat
 
 
-class DoublyWeightedTraceNorm():
-    def __init__(self, X, k, alpha, lambda1, max_iter=100,
-                 tol=1e-6, apg_use_restart=True, verbose=False,
-                 X_vad=None, random_state=None):
-        self.m, self.n = X.shape
-        self.X = X
-        self.data_row, self.data_col = np.nonzero(X)
-        self.data = X[self.data_row, self.data_col]
-        self.X_O = X.copy()
-        self.X_O.data = np.ones_like(self.X_O.data)
-        self.k = k
-        self.alpha = alpha
-        self.lambda1 = lambda1
-        self.max_iter = max_iter
-        self.tol = tol
-        self.X_vad = X_vad
-        self.apg_use_restart = apg_use_restart
-        self.verbose = verbose
+def weighted_max_norm(X, M, W, n_components=20, opt_eps=1e-6, opt_max_iter=100,
+                      init_std=0.01, R=0.01, alpha=5, random_state=None):
+    m, n = X.shape
+    sqrt_R = np.sqrt(R)
 
-        if X_vad is not None:
-            self.data_row_vad, self.data_col_vad = np.nonzero(X_vad)
-            self.data_vad = X_vad.data
+    if random_state is None:
+        rng = np.random.RandomState()
+    elif type(random_state) == np.random.RandomState:
+        rng = random_state
+    else:
+        rng = np.random.RandomState(random_state)
 
-        if random_state is None:
-            self.rng = np.random.RandomState()
-        elif type(random_state) == np.random.RandomState:
-            self.rng = random_state
-        else:
-            self.rng = np.random.RandomState(random_state)
+    U = init_std * rng.rand(m, n_components)
+    V = init_std * rng.rand(n, n_components)
+    m_times_n_components = m * n_components
 
-    def compute_rc_weight(self):
-        tot = np.float(np.sum(self.X_O))
-        col_count = np.array(np.sum(self.X_O, axis=0)).flatten()
-        row_count = np.array(np.sum(self.X_O, axis=1)).flatten()
-        col_p = np.array(np.sum(self.X_O, axis=0)).flatten() / tot
-        row_p = np.array(np.sum(self.X_O, axis=1)).flatten() / tot
-        return tot, row_count, col_count, row_p, col_p
+    def f(_UV, return_gradient=True):
+        U = _UV[:m_times_n_components].reshape(m, n_components)
+        V = _UV[m_times_n_components:].reshape(n, n_components)
+        X_hat_tmp = U.dot(V.T)
+        diff = (X_hat_tmp - X) * M * np.sqrt(W)
+        loss = 1/2 * np.linalg.norm(diff)**2
 
-    def init_weights(self):
-        self.U = self.rng.rand(self.m, self.k).astype(np.float)
-        self.V = self.rng.rand(self.n, self.k).astype(np.float)
+        if not return_gradient:
+            return loss
 
-    def fit(self, P=None):
-        n_users, n_items = self.X.shape
-        self.X_train_mask = (self.X > 0).astype(np.float)
-        self.init_weights()
-        if P is None:
-            self._update()
-        else:
-            self._update(1.0 / P)
-        return self
+        grad_U = np.dot(diff, V)
+        grad_V = np.dot(U.T, diff).T
+        grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
+        return loss, grad_UV
 
-    def _update(self, W=None):
-        X = self.X
-        m, n = X.shape
-        if W is None:
-            W = np.ones((m, n))
-        tot, rn, cn, rp, cp = self.compute_rc_weight()
+    def prox(_UV, t):
+        U_tmp = _UV[:m_times_n_components].reshape(m, n_components)
+        V_tmp = _UV[m_times_n_components:].reshape(n, n_components)
+        tmp_norm_inf = np.max(np.abs(U_tmp.dot(V_tmp.T)))
+        if tmp_norm_inf > alpha:
+            U_tmp = U_tmp * np.sqrt(alpha) / np.sqrt(tmp_norm_inf)
+            V_tmp = V_tmp * np.sqrt(alpha) / np.sqrt(tmp_norm_inf)
+        U = max_row_l2_norm_proj(U_tmp, sqrt_R)
+        V = max_row_l2_norm_proj(V_tmp, sqrt_R)
+        prox_UV = np.concatenate([U.flatten(), V.flatten()])
+        return prox_UV
 
-        def grad(_UV):
-            assert (len(_UV) == m * self.k + n * self.k)
-            U = _UV[:m * self.k].reshape((m, self.k))
-            V = _UV[m * self.k:].reshape((n, self.k))
-            X_hat_tmp = U.dot(V.T)
-            grad_U = -np.dot((X - X_hat_tmp) * W * self.X_train_mask, V)
-            grad_V = -np.dot(U.T, (X - X_hat_tmp) * W * self.X_train_mask).T
-            grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
-            return grad_UV
-
-        def l2_prox(x, t):
-            return np.maximum(
-                1 - t / np.maximum(np.linalg.norm(x, 2), 1e-6), 0.0) * x
-
-        def prox(_UV, t):
-            assert (len(_UV) == m * self.k + n * self.k)
-            U_tmp = _UV[:m * self.k].reshape((m, self.k))
-            V_tmp = _UV[m * self.k:].reshape((n, self.k))
-            U = U_tmp.copy()
-            for i in range(m):
-                U[i] = l2_prox(U_tmp[i], self.lambda1 /
-                               2 *
-                               (np.power(rp[i], self.alpha) /
-                                np.maximum(rn[i], 1)) *
-                               t)
-            V = V_tmp.copy()
-            for i in range(n):
-                V[i] = l2_prox(V_tmp[i], self.lambda1 /
-                               2 *
-                               (np.power(cp[i], self.alpha) /
-                                np.maximum(cn[i], 1)) *
-                               t)
-            prox_UV = np.concatenate([U.flatten(), V.flatten()])
-            return prox_UV
-
-        _UV_hat = apgpy.solve(grad,
-                              prox,
-                              np.concatenate([self.U.flatten(),
-                                              self.V.flatten()]),
-                              max_iters=self.max_iter,
-                              eps=self.tol,
-                              use_restart=self.apg_use_restart,
-                              quiet=(not self.verbose),
-                              use_gra=True)
-        U = _UV_hat[:m * self.k].reshape((m, self.k))
-        V = _UV_hat[m * self.k:].reshape((n, self.k))
-        self.U = U
-        self.V = V
-        self.X_hat = self.U.dot(self.V.T)
-        return self
+    _UV_hat = \
+        minimize_proximal_gradient(f,
+                                   np.concatenate([U.flatten(),
+                                                   V.flatten()]),
+                                   prox, jac=True, max_iter=opt_max_iter,
+                                   tol=opt_eps).x
+    U = _UV_hat[:m_times_n_components].reshape(m, n_components)
+    V = _UV_hat[m_times_n_components:].reshape(n, n_components)
+    X_hat = U.dot(V.T)
+    return X_hat
 
 
-class MaxNorm():
-    def __init__(self, n_components=20, tol=1e-6, max_iter=100, init_std=0.01,
-                 R=0.1, alpha=5, verbose=False, apg_use_restart=True,
-                 random_state=None):
-        self.n_components = n_components
-        self.max_iter = max_iter
-        self.init_std = init_std
-        self.R = R
-        self.alpha = alpha
-        self.verbose = verbose
-        self.tol = tol
-        self.X_hat = None
-        self.apg_use_restart = apg_use_restart
-
-        if random_state is None:
-            self.rng = np.random.RandomState()
-        elif type(random_state) == np.random.RandomState:
-            self.rng = random_state
-        else:
-            self.rng = np.random.RandomState(random_state)
-
-    def _init_params(self, n_users, n_items):
-        ''' Initialize all the latent factors '''
-        self.U = self.init_std * \
-            self.rng.rand(n_users, self.n_components).astype(np.float)
-        self.V = self.init_std * \
-            self.rng.rand(n_items, self.n_components).astype(np.float)
-
-    def fit(self, X, **kwargs):
-        n_users, n_items = X.shape
-        self.X_train_mask = (X > 0).astype(np.float)
-        self._init_params(n_users, n_items)
-        self._update(X)
-        return self
-
-    def _update(self, X, **kwargs):
-        m, n = X.shape
-
-        def grad(_UV):
-            assert (len(_UV) == m * self.n_components + n * self.n_components)
-            U = _UV[:m * self.n_components].reshape((m, self.n_components))
-            V = _UV[m * self.n_components:].reshape((n, self.n_components))
-            X_hat_tmp = U.dot(V.T)
-            grad_U = -np.dot((X - X_hat_tmp) * self.X_train_mask, V)
-            grad_V = -np.dot(U.T, (X - X_hat_tmp) * self.X_train_mask).T
-            grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
-            return grad_UV
-
-        def prox(_UV, t):
-            assert (len(_UV) == m * self.n_components + n * self.n_components)
-            U_tmp = _UV[:m * self.n_components].reshape((m, self.n_components))
-            V_tmp = _UV[m * self.n_components:].reshape((n, self.n_components))
-            tmp_norm_inf = np.linalg.norm(U_tmp.dot(V_tmp.T), np.inf)
-            if tmp_norm_inf > self.alpha:
-                U_tmp = np.sqrt(self.alpha) / np.sqrt(tmp_norm_inf) * U_tmp
-                V_tmp = np.sqrt(self.alpha) / np.sqrt(tmp_norm_inf) * V_tmp
-            U = self._proj(U_tmp, self.R)
-            V = self._proj(V_tmp, self.R)
-            prox_UV = np.concatenate([U.flatten(), V.flatten()])
-            return prox_UV
-
-        _UV_hat = apgpy.solve(grad,
-                              prox,
-                              np.concatenate([self.U.flatten(),
-                                              self.V.flatten()]),
-                              max_iters=self.max_iter,
-                              eps=self.tol,
-                              use_restart=self.apg_use_restart,
-                              quiet=(not self.verbose),
-                              use_gra=True)
-        U = _UV_hat[:m * self.n_components].reshape((m, self.n_components))
-        V = _UV_hat[m * self.n_components:].reshape((n, self.n_components))
-        self.U = U
-        self.V = V
-        self.X_hat = self.U.dot(self.V.T)
-        return self
-
-    def _proj(self, U, R):
-        n, k = U.shape
-        for i in range(n):
-            # print (np.linalg.norm(U[i], 2))
-            if np.linalg.norm(U[i], 2) > R:
-                U[i] = U[i] / np.linalg.norm(U[i], 2) * R
-                # print (np.linalg.norm(U[i], 2))
-        return U
-
-
-class WeightedMaxNorm():
-    def __init__(self, n_components=20, tol=1e-6, max_iter=100, init_std=0.01,
-                 R=0.1, alpha=5, verbose=False, apg_use_restart=True,
-                 random_state=None):
-        self.n_components = n_components
-        self.max_iter = max_iter
-        self.init_std = init_std
-        self.R = R
-        self.alpha = alpha
-        self.verbose = verbose
-        self.tol = tol
-        self.X_hat = None
-        self.apg_use_restart = apg_use_restart
-
-        if random_state is None:
-            self.rng = np.random.RandomState()
-        elif type(random_state) == np.random.RandomState:
-            self.rng = random_state
-        else:
-            self.rng = np.random.RandomState(random_state)
-
-    def _init_params(self, n_users, n_items):
-        ''' Initialize all the latent factors '''
-        self.U = self.init_std * \
-            self.rng.rand(n_users, self.n_components).astype(np.float)
-        self.V = self.init_std * \
-            self.rng.rand(n_items, self.n_components).astype(np.float)
-
-    def fit(self, X, P, **kwargs):
-        n_users, n_items = X.shape
-        self.X_train_mask = (X > 0).astype(np.float)
-        self._init_params(n_users, n_items)
-        self._update(X, 1.0 / P)
-        return self
-
-    def _update(self, X, W, **kwargs):
-        m, n = X.shape
-
-        def grad(_UV):
-            assert (len(_UV) == m * self.n_components + n * self.n_components)
-            U = _UV[:m * self.n_components].reshape((m, self.n_components))
-            V = _UV[m * self.n_components:].reshape((n, self.n_components))
-            X_hat_tmp = U.dot(V.T)
-            grad_U = -np.dot((X - X_hat_tmp) * W * self.X_train_mask, V)
-            grad_V = -np.dot(U.T, (X - X_hat_tmp) * W * self.X_train_mask).T
-            grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
-            return grad_UV
-
-        def prox(_UV, t):
-            assert (len(_UV) == m * self.n_components + n * self.n_components)
-            U_tmp = _UV[:m * self.n_components].reshape((m, self.n_components))
-            V_tmp = _UV[m * self.n_components:].reshape((n, self.n_components))
-            tmp_norm_inf = np.linalg.norm(U_tmp.dot(V_tmp.T), np.inf)
-            if tmp_norm_inf > self.alpha:
-                U_tmp = np.sqrt(self.alpha) / np.sqrt(tmp_norm_inf) * U_tmp
-                V_tmp = np.sqrt(self.alpha) / np.sqrt(tmp_norm_inf) * V_tmp
-            U = self._proj(U_tmp, self.R)
-            V = self._proj(V_tmp, self.R)
-            prox_UV = np.concatenate([U.flatten(), V.flatten()])
-            return prox_UV
-
-        _UV_hat = apgpy.solve(grad,
-                              prox,
-                              np.concatenate([self.U.flatten(),
-                                              self.V.flatten()]),
-                              max_iters=self.max_iter,
-                              eps=self.tol,
-                              use_restart=self.apg_use_restart,
-                              quiet=(not self.verbose))
-        U = _UV_hat[:m * self.n_components].reshape((m, self.n_components))
-        V = _UV_hat[m * self.n_components:].reshape((n, self.n_components))
-        self.U = U
-        self.V = V
-        self.X_hat = self.U.dot(self.V.T)
-        return self
-
-    def _proj(self, U, R):
-        n, k = U.shape
-        for i in range(n):
-            if np.linalg.norm(U[i], 2) > R:
-                U[i] = U[i] / np.linalg.norm(U[i], 2) * R
-        return U
+def max_row_l2_norm_proj(U, threshold):
+    n, k = U.shape
+    for i in range(n):
+        row_l2_norm = np.linalg.norm(U[i])
+        if row_l2_norm > threshold:
+            U[i] = U[i] / row_l2_norm * threshold
+    return U

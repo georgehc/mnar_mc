@@ -9,7 +9,9 @@ from surprise.utils import get_rng
 from mc_algorithms import one_bit_MC_fully_observed, std_logistic_function, \
         grad_std_logistic_function, one_bit_MC_mod_fully_observed, \
         mod_logistic_function, grad_mod_logistic_function
-from models import cache_dir
+from models import cache_dir, compute_and_save_propensity_scores_1bitmc, \
+        compute_and_save_propensity_scores_1bitmc_mod, \
+        compute_normalized_inverse_propensity_score_weights
 
 
 class WeightedSVD(AlgoBase):
@@ -69,109 +71,16 @@ class WeightedSVD(AlgoBase):
 
         if type(self.propensity_scores) == np.ndarray:
             P_hat = self.propensity_scores
+        elif self.propensity_scores is None:
+            P_hat = np.ones((trainset.n_users, trainset.n_items))
         elif self.propensity_scores == '1bitmc':
-            if self.verbose:
-                print('Estimating propensity scores via matrix completion...')
-
-            while True:
-                memoize_hash = hashlib.sha256(M.data.tobytes())
-                memoize_hash.update(
-                        json.dumps([self.one_bit_mc_tau,
-                                    self.one_bit_mc_gamma,
-                                    self.one_bit_mc_max_rank]).encode('utf-8'))
-                cache_filename = os.path.join(cache_dir,
-                                              memoize_hash.hexdigest()
-                                              + '.txt')
-                if not os.path.isfile(cache_filename):
-                    os.makedirs(cache_dir, exist_ok=True)
-                    P_hat = \
-                        one_bit_MC_fully_observed(
-                            M, std_logistic_function,
-                            grad_std_logistic_function,
-                            self.one_bit_mc_tau,
-                            self.one_bit_mc_gamma,
-                            max_rank=self.one_bit_mc_max_rank)
-                    try:
-                        np.savetxt(cache_filename, P_hat)
-                    except:
-                        pass
-                else:
-                    try:
-                        P_hat = np.loadtxt(cache_filename)
-                        if P_hat.shape[0] != trainset.n_users or \
-                                P_hat.shape[1] != trainset.n_items:
-                            print('*** WARNING: Recomputing propensity scores '
-                                  + '(mismatched dimensions in cached file)')
-                            try:
-                                os.remove(cache_filename)
-                            except:
-                                pass
-                            continue
-                    except ValueError:
-                        print('*** WARNING: Recomputing propensity scores '
-                              + '(malformed numpy array encountered)')
-                        try:
-                            os.remove(cache_filename)
-                        except:
-                            pass
-                        continue
-                break
+            P_hat = compute_and_save_propensity_scores_1bitmc(
+                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
+                        self.one_bit_mc_max_rank, verbose=self.verbose)
         elif self.propensity_scores == '1bitmc_mod':
-            if self.verbose:
-                print('Estimating propensity scores via matrix completion...')
-
-            while True:
-                memoize_hash = hashlib.sha256(M.data.tobytes())
-                memoize_hash.update(
-                        json.dumps(['1bitmc-mod',
-                                    self.one_bit_mc_tau,
-                                    self.one_bit_mc_gamma,
-                                    self.one_bit_mc_max_rank]).encode('utf-8'))
-                cache_filename = os.path.join(cache_dir,
-                                              memoize_hash.hexdigest()
-                                              + '.txt')
-                if not os.path.isfile(cache_filename):
-                    one_minus_logistic_gamma \
-                        = 1 - std_logistic_function(self.one_bit_mc_gamma)
-                    link = lambda x: \
-                        mod_logistic_function(x, self.one_bit_mc_gamma,
-                                              one_minus_logistic_gamma)
-                    grad_link = lambda x: \
-                        grad_mod_logistic_function(x, self.one_bit_mc_gamma,
-                                                   one_minus_logistic_gamma)
-                                                           
-                    os.makedirs(cache_dir, exist_ok=True)
-                    P_hat = \
-                        one_bit_MC_mod_fully_observed(M, link, grad_link,
-                                                      self.one_bit_mc_tau,
-                                                      self.one_bit_mc_gamma,
-                                                      max_rank=
-                                                      self.one_bit_mc_max_rank)
-                    try:
-                        np.savetxt(cache_filename, P_hat)
-                    except:
-                        pass
-                else:
-                    try:
-                        P_hat = np.loadtxt(cache_filename)
-                        if P_hat.shape[0] != trainset.n_users or \
-                                P_hat.shape[1] != trainset.n_items:
-                            print('*** WARNING: Recomputing propensity scores '
-                                  + '(mismatched dimensions in cached file)')
-                            try:
-                                os.remove(cache_filename)
-                            except:
-                                pass
-                            continue
-                    except ValueError:
-                        print('*** WARNING: Recomputing propensity scores '
-                              + '(malformed numpy array encountered)')
-                        try:
-                            os.remove(cache_filename)
-                        except:
-                            pass
-                        continue
-                break
+            P_hat = compute_and_save_propensity_scores_1bitmc_mod(
+                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
+                        self.one_bit_mc_max_rank, verbose=self.verbose)
         else:
             raise Exception('Unknown weight method: ' + self.propensity_scores)
         self.propensity_estimates = P_hat
@@ -179,9 +88,9 @@ class WeightedSVD(AlgoBase):
         if self.verbose:
             print('Running debiased matrix completion...')
 
-        weights = 1 / P_hat
+        W = compute_normalized_inverse_propensity_score_weights(P_hat, M)
         sparse_row_indices, sparse_col_indices, sparse_data = \
-            zip(*[(u, i, weights[u, i]) for u, i, r in trainset.all_ratings()])
+            zip(*[(u, i, W[u, i]) for u, i, r in trainset.all_ratings()])
         self.weights_sparse = \
             csr_matrix((sparse_data, (sparse_row_indices, sparse_col_indices)),
                        shape=(trainset.n_users, trainset.n_items)).tocsr()
@@ -259,7 +168,7 @@ class WeightedSVD(AlgoBase):
         if not self.biased:
             global_mean = 0
 
-        weights = self.weights_sparse
+        sqrt_weights = np.sqrt(self.weights_sparse)
 
         for current_epoch in range(self.n_epochs):
             if self.verbose:
@@ -270,7 +179,8 @@ class WeightedSVD(AlgoBase):
                 dot = 0  # <q_i, p_u>
                 for f in range(self.n_factors):
                     dot += qi[i, f] * pu[u, f]
-                err = (r - (global_mean + bu[u] + bi[i] + dot)) * weights[u, i]
+                err = (r - (global_mean + bu[u] + bi[i] + dot)) \
+                    * sqrt_weights[u, i]
 
                 # update biases
                 if self.biased:
@@ -373,103 +283,16 @@ class WeightedSVDpp(AlgoBase):
 
         if type(self.propensity_scores) == np.ndarray:
             P_hat = self.propensity_scores
+        elif self.propensity_scores is None:
+            P_hat = np.ones((trainset.n_users, trainset.n_items))
         elif self.propensity_scores == '1bitmc':
-            if self.verbose:
-                print('Estimating propensity scores via matrix completion...')
-
-            while True:
-                memoize_hash = hashlib.sha256(M.data.tobytes())
-                memoize_hash.update(
-                        json.dumps([self.one_bit_mc_tau,
-                                    self.one_bit_mc_gamma,
-                                    self.one_bit_mc_max_rank]).encode('utf-8'))
-                cache_filename = os.path.join(cache_dir,
-                                              memoize_hash.hexdigest()
-                                              + '.txt')
-                if not os.path.isfile(cache_filename):
-                    os.makedirs(cache_dir, exist_ok=True)
-                    P_hat = \
-                        one_bit_MC_fully_observed(
-                            M, std_logistic_function,
-                            grad_std_logistic_function,
-                            self.one_bit_mc_tau,
-                            self.one_bit_mc_gamma,
-                            max_rank=self.one_bit_mc_max_rank)
-                    try:
-                        np.savetxt(cache_filename, P_hat)
-                    except:
-                        pass
-                else:
-                    try:
-                        P_hat = np.loadtxt(cache_filename)
-                        if P_hat.shape[0] != trainset.n_users or \
-                                P_hat.shape[1] != trainset.n_items:
-                            print('*** WARNING: Recomputing propensity scores '
-                                  + '(mismatched dimensions in cached file)')
-                            try:
-                                os.remove(cache_filename)
-                            except:
-                                pass
-                            continue
-                    except ValueError:
-                        print('*** WARNING: Recomputing propensity scores '
-                              + '(malformed numpy array encountered)')
-                        try:
-                            os.remove(cache_filename)
-                        except:
-                            pass
-                        continue
-                break
+            P_hat = compute_and_save_propensity_scores_1bitmc(
+                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
+                        self.one_bit_mc_max_rank, verbose=self.verbose)
         elif self.propensity_scores == '1bitmc_mod':
-            if self.verbose:
-                print('Estimating propensity scores via matrix completion...')
-
-            while True:
-                memoize_hash = hashlib.sha256(M.data.tobytes())
-                memoize_hash.update(
-                        json.dumps(['1bitmc-mod',
-                                    self.one_bit_mc_tau,
-                                    self.one_bit_mc_gamma,
-                                    self.one_bit_mc_max_rank]).encode('utf-8'))
-                cache_filename = os.path.join(cache_dir,
-                                              memoize_hash.hexdigest()
-                                              + '.txt')
-                if not os.path.isfile(cache_filename):
-                    one_minus_logistic_gamma \
-                        = 1 - std_logistic_function(self.one_bit_mc_gamma)
-                    link = lambda x: \
-                        mod_logistic_function(x, self.one_bit_mc_gamma,
-                                              one_minus_logistic_gamma)
-                    grad_link = lambda x: \
-                        grad_mod_logistic_function(x, self.one_bit_mc_gamma,
-                                                   one_minus_logistic_gamma)
-                                                           
-                    os.makedirs(cache_dir, exist_ok=True)
-                    P_hat = \
-                        one_bit_MC_mod_fully_observed(M, link, grad_link,
-                                                      self.one_bit_mc_tau,
-                                                      self.one_bit_mc_gamma,
-                                                      max_rank=
-                                                      self.one_bit_mc_max_rank)
-                    try:
-                        np.savetxt(cache_filename, P_hat)
-                    except:
-                        pass
-                else:
-                    try:
-                        P_hat = np.loadtxt(cache_filename)
-                        if P_hat.shape[0] != trainset.n_users or \
-                                P_hat.shape[1] != trainset.n_items:
-                            print('*** WARNING: Recomputing propensity scores '
-                                  + '(mismatched dimensions in cached file)')
-                            os.remove(cache_filename)
-                            continue
-                    except ValueError:
-                        print('*** WARNING: Recomputing propensity scores '
-                              + '(malformed numpy array encountered)')
-                        os.remove(cache_filename)
-                        continue
-                break
+            P_hat = compute_and_save_propensity_scores_1bitmc_mod(
+                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
+                        self.one_bit_mc_max_rank, verbose=self.verbose)
         else:
             raise Exception('Unknown weight method: ' + self.propensity_scores)
         self.propensity_estimates = P_hat
@@ -477,9 +300,9 @@ class WeightedSVDpp(AlgoBase):
         if self.verbose:
             print('Running debiased matrix completion...')
 
-        weights = 1 / P_hat
+        W = compute_normalized_inverse_propensity_score_weights(P_hat, M)
         sparse_row_indices, sparse_col_indices, sparse_data = \
-            zip(*[(u, i, weights[u, i]) for u, i, r in trainset.all_ratings()])
+            zip(*[(u, i, W[u, i]) for u, i, r in trainset.all_ratings()])
         self.weights_sparse = \
             csr_matrix((sparse_data, (sparse_row_indices, sparse_col_indices)),
                        shape=(trainset.n_users, trainset.n_items)).tocsr()
@@ -531,7 +354,7 @@ class WeightedSVDpp(AlgoBase):
                         (trainset.n_items, self.n_factors))
         u_impl_fdb = np.zeros(self.n_factors, np.double)
 
-        weights = self.weights_sparse
+        sqrt_weights = np.sqrt(self.weights_sparse)
 
         for current_epoch in range(self.n_epochs):
             if self.verbose:
@@ -553,7 +376,8 @@ class WeightedSVDpp(AlgoBase):
                 for f in range(self.n_factors):
                     dot += qi[i, f] * (pu[u, f] + u_impl_fdb[f])
 
-                err = (r - (global_mean + bu[u] + bi[i] + dot)) * weights[u, i]
+                err = (r - (global_mean + bu[u] + bi[i] + dot)) \
+                    * sqrt_weights[u, i]
 
                 # update biases
                 bu[u] += lr_bu * (err - reg_bu * bu[u])

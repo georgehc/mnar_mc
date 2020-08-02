@@ -3,6 +3,6 @@ from Cython.Build import cythonize
 import numpy
 
 setup(
-    ext_modules = cythonize("weighted_surprise_prediction_algorithms.pyx"),
+    ext_modules=cythonize("*.pyx"),
     include_dirs=[numpy.get_include()]
     )

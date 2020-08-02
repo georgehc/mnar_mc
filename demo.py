@@ -18,11 +18,16 @@ warnings.filterwarnings("ignore")
 
 from surprise import Dataset, Reader, SVD, SVDpp, accuracy, KNNBasic
 from surprise.model_selection import GridSearchCV, train_test_split
-from models import SoftImputeWrapper, WeightedSoftImputeWrapper, \
-        SoftImputeALSWrapper, WeightedSoftImputeALSWrapper, \
-        ExpoMFWrapper, WeightedTraceNormWrapper, \
-        DoublyWeightedTraceNormWrapper, MaxNormWrapper, WeightedMaxNormWrapper
+from models import WeightedSoftImputeWrapper, WeightedSoftImputeALSWrapper, \
+        ExpoMFWrapper, DoublyWeightedTraceNormWrapper, WeightedMaxNormWrapper
 from weighted_surprise_prediction_algorithms import WeightedSVD, WeightedSVDpp
+
+try:
+    # prevent numpy/scipy/etc from only using a single processor; see:
+    # https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
+    os.system("taskset -p 0xffffffff %d" % os.getpid())
+except Exception:
+    pass
 
 
 output_dir = 'output'
@@ -71,19 +76,21 @@ param_grids = {
              'random_state': [0]},
         'SoftImpute': {'max_rank': [40],
                        'lmbda': [1, 10, 100],
-                       'max_iter': [200],
+                       'max_iter': [100],
                        'min_value': [1],
                        'max_value': [5]},
         'SoftImputeALS': {'max_rank': [40],
                           'lmbda': [1, 10, 100],
-                          'max_iter': [200],
+                          'max_iter': [100],
                           'verbose': [False]},
         'MaxNorm' : {'n_components': [10, 20, 40],
-                     'R': [100, 1000, 10000],
-                     'alpha': [100, 1000, 10000],
+                     'R': [1, 10, 100],
+                     'alpha': [5, 10, 20],
+                     'max_iter': [100],
                      'random_state': [0]},
-        'WTN'     : {'k': [10, 20, 40],
-                     'lambda1' : [10000, 100000],
+        'WTN'     : {'n_components': [10, 20, 40],
+                     'lmbda' : [1, 10, 100],
+                     'max_iter': [100],
                      'random_state': [0]},
         'ExpoMF'  : {'n_components': [10, 20, 40],
                      'random_state': [0]},
@@ -149,10 +156,10 @@ algorithms = {
         'PMF': SVD,
         'SVD': SVD,
         'SVDpp': SVDpp,
-        'SoftImpute': SoftImputeWrapper,
-        'SoftImputeALS': SoftImputeALSWrapper,
-        'MaxNorm': MaxNormWrapper,
-        'WTN': WeightedTraceNormWrapper,
+        'SoftImpute': WeightedSoftImputeWrapper,
+        'SoftImputeALS': WeightedSoftImputeALSWrapper,
+        'MaxNorm': WeightedMaxNormWrapper,
+        'WTN': DoublyWeightedTraceNormWrapper,
         'ExpoMF': ExpoMFWrapper,
         'KNN': KNNBasic,
         '1bitMC-PMF': WeightedSVD,
