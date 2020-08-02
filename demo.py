@@ -25,7 +25,8 @@ from weighted_surprise_prediction_algorithms import WeightedSVD, WeightedSVDpp
 try:
     # prevent numpy/scipy/etc from only using a single processor; see:
     # https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
-    os.system("taskset -p 0xffffffff %d" % os.getpid())
+    os.system("taskset -p 0x%s %d"
+              % ('f' * int(np.ceil(os.cpu_count() / 4)), os.getpid()))
 except Exception:
     pass
 
