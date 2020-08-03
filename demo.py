@@ -16,19 +16,20 @@ import warnings
 os.environ['QT_QPA_PLATFORM']='offscreen'
 warnings.filterwarnings("ignore")
 
+from subprocess import DEVNULL, call
 from surprise import Dataset, Reader, SVD, SVDpp, accuracy, KNNBasic
 from surprise.model_selection import GridSearchCV, train_test_split
 from models import WeightedSoftImputeWrapper, WeightedSoftImputeALSWrapper, \
         ExpoMFWrapper, DoublyWeightedTraceNormWrapper, WeightedMaxNormWrapper
 from weighted_surprise_prediction_algorithms import WeightedSVD, WeightedSVDpp
 
-try:
-    # prevent numpy/scipy/etc from only using a single processor; see:
-    # https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
-    os.system("taskset -p 0x%s %d"
-              % ('f' * int(np.ceil(os.cpu_count() / 4)), os.getpid()))
-except Exception:
-    pass
+
+# prevent numpy/scipy/etc from only using a single processor; see:
+# https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
+# (note that this is unix/linux only and should silently error on other
+# platforms)
+call(['taskset', '-p', '0x%s' % ('f' * int(np.ceil(os.cpu_count() / 4))),
+      '%d' % os.getpid()], stdout=DEVNULL, stderr=DEVNULL)
 
 
 output_dir = 'output'
@@ -36,7 +37,7 @@ algs_to_run = ['1bitMC-PMF']
 # algs_to_run = ['PMF', 'SVD', 'SVDpp', 'SoftImpute', 'MaxNorm', 'WTN', 'ExpoMF',
 #                '1bitMC-PMF', '1bitMC-SVD', '1bitMC-SVDpp', '1bitMC-SoftImpute',
 #                '1bitMC-MaxNorm', '1bitMC-WTN',
-#                'NB-PMF', 'NB-SVD', 'NB-SVDpp', 'NB-SoftImpute', 
+#                'NB-PMF', 'NB-SVD', 'NB-SVDpp', 'NB-SoftImpute',
 #                'NB-MaxNorm', 'NB-WTN',
 #                'LR-PMF', 'LR-SVD', 'LR-SVDpp', 'LR-SoftImpute',
 #                'LR-MaxNorm', 'LR-WTN']

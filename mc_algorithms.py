@@ -54,11 +54,20 @@ References:
     Neural Information Processing Systems, pages 2056–2064, 2010.
 """
 import numpy as np
+import os
 from copt import minimize_proximal_gradient, minimize_three_split
 from scipy.linalg import svd
 from scipy.optimize import minimize
 from sklearn.utils.extmath import randomized_svd
+from subprocess import DEVNULL, call
 from nuc_shrinkage_helper import shrinkage_singular_values
+
+# prevent numpy/scipy/etc from only using a single processor; see:
+# https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
+# (note that this is unix/linux only and should silently error on other
+# platforms)
+call(['taskset', '-p', '0x%s' % ('f' * int(np.ceil(os.cpu_count() / 4))),
+      '%d' % os.getpid()], stdout=DEVNULL, stderr=DEVNULL)
 
 
 def std_logistic_function(x):

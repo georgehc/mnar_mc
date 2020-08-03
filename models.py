@@ -8,8 +8,9 @@ import hashlib
 import numpy as np
 import os
 from scipy.sparse import csr_matrix
-from surprise import AlgoBase, PredictionImpossible
 from soft_impute_ALS import WeightedSoftImpute_ALS
+from surprise import AlgoBase, PredictionImpossible
+from subprocess import DEVNULL, call
 from mc_algorithms import one_bit_MC_fully_observed, std_logistic_function, \
         grad_std_logistic_function, weighted_softimpute, \
         one_bit_MC_mod_fully_observed, mod_logistic_function, \
@@ -19,6 +20,13 @@ from expomf import ExpoMF
 
 
 cache_dir = 'cache_propensity_estimates'
+
+# prevent numpy/scipy/etc from only using a single processor; see:
+# https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
+# (note that this is unix/linux only and should silently error on other
+# platforms)
+call(['taskset', '-p', '0x%s' % ('f' * int(np.ceil(os.cpu_count() / 4))),
+      '%d' % os.getpid()], stdout=DEVNULL, stderr=DEVNULL)
 
 
 class WeightedSoftImputeWrapper(AlgoBase):
