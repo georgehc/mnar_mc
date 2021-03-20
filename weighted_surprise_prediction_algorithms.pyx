@@ -1,3 +1,4 @@
+#cython: language_level=3, boundscheck=False, wraparound=False, nonecheck=False
 import json
 import hashlib
 import numpy as np
@@ -9,9 +10,9 @@ from surprise.utils import get_rng
 from mc_algorithms import one_bit_MC_fully_observed, std_logistic_function, \
         grad_std_logistic_function, one_bit_MC_mod_fully_observed, \
         mod_logistic_function, grad_mod_logistic_function
-from models import cache_dir, compute_and_save_propensity_scores_1bitmc, \
-        compute_and_save_propensity_scores_1bitmc_mod, \
-        compute_normalized_inverse_propensity_score_weights
+from models import compute_propensity_scores, \
+        compute_normalized_inverse_propensity_score_weights, \
+        linux_use_all_cores
 
 
 class WeightedSVD(AlgoBase):
@@ -20,24 +21,18 @@ class WeightedSVD(AlgoBase):
     weighting of the individual matrix entries.
 
     The parameters for initialization are the same as SVD except now there
-    are a few extras:
-    - propensity_scores: '1bitmc' or a user-supplied propensity score matrix
-    - one_bit_mc_max_rank: for running 1bitmc, what to use as the max rank
-        during optimization (choose None to use full SVD or specify an integer
-        to use randomized SVD)
-    - one_bit_mc_tau: ask for nuclear norm of the 1bitMC parameter matrix to be
-        at most tau*sqrt( number of rows * number of columns )
-    - one_bit_mc_gamma: ask for the entry-wise max norm of the 1bitMC parameter
-        matrix to be at most gamma
+    are a few extras (same usage pattern as the models in models.py).
     """
-
     def __init__(self, n_factors=100, n_epochs=20, biased=True, init_mean=0,
                  init_std_dev=.1, lr_all=.005,
                  reg_all=.02, lr_bu=None, lr_bi=None, lr_pu=None, lr_qi=None,
                  reg_bu=None, reg_bi=None, reg_pu=None, reg_qi=None,
                  random_state=None, verbose=False,
                  propensity_scores='1bitmc', one_bit_mc_max_rank=None,
-                 one_bit_mc_tau=1., one_bit_mc_gamma=1.):
+                 one_bit_mc_tau=1., one_bit_mc_gamma=1.,
+                 one_bit_mc_approx_lr=0.1, row_cf_k=10, row_cf_thres=0.1,
+                 approx=True, user_features=None, item_features=None,
+                 min_prob=.05, mcar_data=None, cache_prefix=''):
 
         self.n_factors = n_factors
         self.n_epochs = n_epochs
@@ -58,31 +53,50 @@ class WeightedSVD(AlgoBase):
         self.one_bit_mc_max_rank = one_bit_mc_max_rank
         self.one_bit_mc_tau = one_bit_mc_tau
         self.one_bit_mc_gamma = one_bit_mc_gamma
+        self.one_bit_mc_approx_lr = one_bit_mc_approx_lr
+        self.row_cf_k = row_cf_k
+        self.row_cf_thres = row_cf_thres
+        self.approx = approx
+        self.user_features = user_features
+        self.item_features = item_features
+        self.min_prob = min_prob
+        self.mcar_data = mcar_data
+        self.cache_prefix = cache_prefix
 
         AlgoBase.__init__(self)
 
     def fit(self, trainset):
+        linux_use_all_cores()
 
         AlgoBase.fit(self, trainset)
 
         M = np.zeros((trainset.n_users, trainset.n_items))
-        for u, i, _ in trainset.all_ratings():
+        X = np.zeros((trainset.n_users, trainset.n_items))
+        for u, i, r in trainset.all_ratings():
             M[u, i] = 1
+            X[u, i] = r
 
-        if type(self.propensity_scores) == np.ndarray:
-            P_hat = self.propensity_scores
-        elif self.propensity_scores is None:
-            P_hat = np.ones((trainset.n_users, trainset.n_items))
-        elif self.propensity_scores == '1bitmc':
-            P_hat = compute_and_save_propensity_scores_1bitmc(
-                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
-                        self.one_bit_mc_max_rank, verbose=self.verbose)
-        elif self.propensity_scores == '1bitmc_mod':
-            P_hat = compute_and_save_propensity_scores_1bitmc_mod(
-                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
-                        self.one_bit_mc_max_rank, verbose=self.verbose)
+        if self.propensity_scores == 'naive bayes':
+            P_est_input = X
         else:
-            raise Exception('Unknown weight method: ' + self.propensity_scores)
+            P_est_input = M
+        P_hat = compute_propensity_scores(P_est_input,
+                                          self.propensity_scores,
+                                          (trainset.n_users,
+                                           trainset.n_items),
+                                          self.one_bit_mc_tau,
+                                          self.one_bit_mc_gamma,
+                                          self.one_bit_mc_max_rank,
+                                          self.one_bit_mc_approx_lr,
+                                          self.row_cf_k,
+                                          self.row_cf_thres,
+                                          self.approx,
+                                          self.verbose,
+                                          self.user_features,
+                                          self.item_features,
+                                          self.min_prob,
+                                          self.mcar_data,
+                                          self.cache_prefix)
         self.propensity_estimates = P_hat
 
         if self.verbose:
@@ -172,7 +186,7 @@ class WeightedSVD(AlgoBase):
 
         for current_epoch in range(self.n_epochs):
             if self.verbose:
-                print("Processing epoch {}".format(current_epoch))
+                print("Processing epoch {}".format(current_epoch), flush=True)
             for u, i, r in trainset.all_ratings():
 
                 # compute current error
@@ -232,23 +246,17 @@ class WeightedSVDpp(AlgoBase):
     weighting of the individual matrix entries.
 
     The parameters for initialization are the same as SVDpp except now there
-    are a few extras:
-    - propensity_scores: '1bitmc' or a user-supplied propensity score matrix
-    - one_bit_mc_max_rank: for running 1bitmc, what to use as the max rank
-        during optimization (choose None to use full SVD or specify an integer
-        to use randomized SVD)
-    - one_bit_mc_tau: ask for nuclear norm of the 1bitMC parameter matrix to be
-        at most tau*sqrt( number of rows * number of columns )
-    - one_bit_mc_gamma: ask for the entry-wise max norm of the 1bitMC parameter
-        matrix to be at most gamma
+    are a few extras (same usage pattern as the models in models.py).
     """
-
     def __init__(self, n_factors=20, n_epochs=20, init_mean=0, init_std_dev=.1,
                  lr_all=.007, reg_all=.02, lr_bu=None, lr_bi=None, lr_pu=None,
                  lr_qi=None, lr_yj=None, reg_bu=None, reg_bi=None, reg_pu=None,
                  reg_qi=None, reg_yj=None, random_state=None, verbose=False,
                  propensity_scores='1bitmc', one_bit_mc_max_rank=None,
-                 one_bit_mc_tau=1., one_bit_mc_gamma=1.):
+                 one_bit_mc_tau=1., one_bit_mc_gamma=1.,
+                 one_bit_mc_approx_lr=.1, row_cf_k=10, row_cf_thres=0.1,
+                 approx=True, user_features=None, item_features=None,
+                 min_prob=.05, mcar_data=None, cache_prefix=''):
 
         self.n_factors = n_factors
         self.n_epochs = n_epochs
@@ -270,31 +278,50 @@ class WeightedSVDpp(AlgoBase):
         self.one_bit_mc_max_rank = one_bit_mc_max_rank
         self.one_bit_mc_tau = one_bit_mc_tau
         self.one_bit_mc_gamma = one_bit_mc_gamma
+        self.one_bit_mc_approx_lr = one_bit_mc_approx_lr
+        self.row_cf_k = row_cf_k
+        self.row_cf_thres = row_cf_thres
+        self.approx = approx
+        self.user_features = user_features
+        self.item_features = item_features
+        self.min_prob = min_prob
+        self.mcar_data = mcar_data
+        self.cache_prefix = cache_prefix
 
         AlgoBase.__init__(self)
 
     def fit(self, trainset):
+        linux_use_all_cores()
 
         AlgoBase.fit(self, trainset)
 
         M = np.zeros((trainset.n_users, trainset.n_items))
-        for u, i, _ in trainset.all_ratings():
+        X = np.zeros((trainset.n_users, trainset.n_items))
+        for u, i, r in trainset.all_ratings():
             M[u, i] = 1
+            X[u, i] = r
 
-        if type(self.propensity_scores) == np.ndarray:
-            P_hat = self.propensity_scores
-        elif self.propensity_scores is None:
-            P_hat = np.ones((trainset.n_users, trainset.n_items))
-        elif self.propensity_scores == '1bitmc':
-            P_hat = compute_and_save_propensity_scores_1bitmc(
-                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
-                        self.one_bit_mc_max_rank, verbose=self.verbose)
-        elif self.propensity_scores == '1bitmc_mod':
-            P_hat = compute_and_save_propensity_scores_1bitmc_mod(
-                        M, self.one_bit_mc_tau, self.one_bit_mc_gamma,
-                        self.one_bit_mc_max_rank, verbose=self.verbose)
+        if self.propensity_scores == 'naive bayes':
+            P_est_input = X
         else:
-            raise Exception('Unknown weight method: ' + self.propensity_scores)
+            P_est_input = M
+        P_hat = compute_propensity_scores(P_est_input,
+                                          self.propensity_scores,
+                                          (trainset.n_users,
+                                           trainset.n_items),
+                                          self.one_bit_mc_tau,
+                                          self.one_bit_mc_gamma,
+                                          self.one_bit_mc_max_rank,
+                                          self.one_bit_mc_approx_lr,
+                                          self.row_cf_k,
+                                          self.row_cf_thres,
+                                          self.approx,
+                                          self.verbose,
+                                          self.user_features,
+                                          self.item_features,
+                                          self.min_prob,
+                                          self.mcar_data,
+                                          self.cache_prefix)
         self.propensity_estimates = P_hat
 
         if self.verbose:
@@ -358,7 +385,7 @@ class WeightedSVDpp(AlgoBase):
 
         for current_epoch in range(self.n_epochs):
             if self.verbose:
-                print(" processing epoch {}".format(current_epoch))
+                print(" processing epoch {}".format(current_epoch), flush=True)
             for u, i, r in trainset.all_ratings():
 
                 # items rated by u. This is COSTLY

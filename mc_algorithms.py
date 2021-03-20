@@ -6,11 +6,23 @@ propensity scores from fully observed binary matrices:
 - 1-bit matrix completion (Davenport et al 2014) specialized to fully-observed
   data; we refer to this algorithm as "1bitMC" (with some variants on what gets
   capitalized and whether the "1" at the front gets replaced by "one" due to
-  Python not allowing variable names to start with numbers)
+  Python not allowing variable names to start with numbers):
+  - note that at this point, we have both a fast version solved via
+    reformulating the problem as a nonconvex optimization problem (and then
+    using AdaGrad (Duchi et al 2011)), as well as a slow reference version
+    based on using nuclear norm and entrywise max norm projections
+    (specifically, we use the three-operator splitting approach by Davis and
+    Yin (2017))
+- RowCF-kNN (nearest-neighbor-based collaborative filtering):
+  - there is both a fast version (using hnswlib (Malkov and Yashunin 2018) for
+    approximate nearest neighbor search) and a slow exact version
 - a modified version of 1-bit matrix completion meant for handling propensity
   scores that are exactly 1 (we call this algorithm 1bitMC-mod); this is
   discussed in the longer version of the paper where we use it in conjunction
   with a modified logistic regression link function
+  - for now there is just a slow reference version (coded in the same manner
+    as the 1bitMC slow reference version, i.e., using the Davis-Yin three-way
+    operator split)
 
 We've implemented the following matrix completion algorithms and their variants
 that can weight the different matrix entries in the squared loss for ratings
@@ -31,7 +43,7 @@ that can weight the different matrix entries in the squared loss for ratings
 - a variant of MaxNorm where the entries in the squared loss for ratings are
   weighted
 
-Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (weima@cmu.edu)
+Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (wei.w.ma@polyu.edu.hk)
 
 This code uses the following library (on top of Anaconda Python 3.7):
 - copt: pip install -U copt
@@ -44,30 +56,47 @@ References:
     Mark A. Davenport, Yaniv Plan, Ewout Van Den Berg, and Mary Wootters.
     1-bit matrix completion. Information and Inference, 3(3):189–223, 2014
 
+    Damek Davis and Wotao Yin. A three-operator splitting scheme and its
+    optimization applications. Set-Valued and Variational Analysis,
+    25(4):829-858, 2017.
+
+    John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for
+    online learning and stochastic optimization. Journal of Machine Learning
+    Research, 12(61):2121-2159, 2011.
+
     Jason D. Lee, Ben Recht, Nathan Srebro, Joel Tropp, and Ruslan R.
     Salakhutdinov. Practical large-scale optimization for max-norm
     regularization. In Advances in Neural Information Processing Systems,
     pages 1297-1305, 2010.
 
+    Yu A. Malkov and Dmitry A. Yashunin. Efficient and robust approximate
+    nearest neighbor search using hierarchical navigable small world graphs.
+    IEEE Transactions on Pattern Analysis and Machine Intelligence,
+    42(4):824-836, 2018.
+
     Nathan Srebro and Ruslan R. Salakhutdinov. Collaborative filtering in a
     non-uniform world: Learning with the weighted trace norm. In Advances in
     Neural Information Processing Systems, pages 2056–2064, 2010.
 """
+import hnswlib
 import numpy as np
 import os
+import time
 from copt import minimize_proximal_gradient, minimize_three_split
+from scipy import optimize
 from scipy.linalg import svd
 from scipy.optimize import minimize
+from scipy.sparse import coo_matrix
+from scipy.spatial.distance import squareform, pdist
 from sklearn.utils.extmath import randomized_svd
 from subprocess import DEVNULL, call
-from nuc_shrinkage_helper import shrinkage_singular_values
 
-# prevent numpy/scipy/etc from only using a single processor; see:
-# https://stackoverflow.com/questions/15639779/why-does-multiprocessing-use-only-a-single-core-after-i-import-numpy
-# (note that this is unix/linux only and should silently error on other
-# platforms)
-call(['taskset', '-p', '0x%s' % ('f' * int(np.ceil(os.cpu_count() / 4))),
-      '%d' % os.getpid()], stdout=DEVNULL, stderr=DEVNULL)
+from nuc_shrinkage_helper import shrinkage_singular_values
+from one_bit_MC_fully_observed_approx_helper import \
+    one_bit_MC_fully_observed_approx_helper_adagrad
+from weighted_max_norm_helper import weighted_max_norm_helper_adagrad
+from doubly_weighted_trace_norm_helper import \
+    doubly_weighted_trace_norm_helper_adagrad
 
 
 def std_logistic_function(x):
@@ -77,6 +106,42 @@ def std_logistic_function(x):
 def grad_std_logistic_function(x):
     z = np.exp(-x)
     return z / (1 + z)**2
+
+
+def row_cf(M, k, thres, metric='hamming'):
+    m, n = M.shape
+    distances = squareform(pdist(M, metric=metric))
+    P_hat = np.zeros((m, n))
+    for i in range(m):
+        small_k_row_idx = np.argpartition(distances[i], k)[:k]
+        P_hat[i] = M[small_k_row_idx, :].mean(axis=0)
+    thres_mask = (P_hat < thres)
+    if np.any(thres_mask):
+        P_hat[thres_mask] = thres
+    return P_hat
+
+
+def row_cf_approx(M, k, thres, hnsw_M=48, hnsw_seed=0, hnsw_search_n_jobs=1):
+    m, n = M.shape
+
+    # cosine distance becomes equivalent to Hamming up to scale factor of 2
+    M_rescaled = 2*M.astype(np.float32) - 1
+    index = hnswlib.Index('cosine', n)
+    index.init_index(m, ef_construction=k, M=hnsw_M, random_seed=hnsw_seed)
+    # for deterministic index construction, need to use 1 thread
+    index.add_items(M_rescaled, num_threads=1)
+    index.set_ef(k)
+    nearest_neighbor_indices = \
+        index.knn_query(M_rescaled, k=k,
+                        num_threads=hnsw_search_n_jobs)[0]
+
+    P_hat = np.zeros((m, n))
+    for i in range(m):
+        P_hat[i] = M[nearest_neighbor_indices[i]].mean(axis=0)
+    thres_mask = (P_hat < thres)
+    if np.any(thres_mask):
+        P_hat[thres_mask] = thres
+    return P_hat
 
 
 def mod_logistic_function(x, gamma, one_minus_logistic_gamma):
@@ -92,8 +157,7 @@ def grad_mod_logistic_function(x, gamma, one_minus_logistic_gamma):
 
 def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma,
                               max_rank=None, opt_max_iter=2000,
-                              opt_eps=1e-6, shrinkage_search_eps=1e-8,
-                              max_num_proj_iter=1000):
+                              opt_eps=1e-6, shrinkage_search_eps=1e-8):
     # parameters are the same as in the paper; if `max_rank` is set to None,
     # then exact SVD is used
     m = M.shape[0]
@@ -106,14 +170,14 @@ def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma,
         if max_rank is None:
             U, S, VT = svd(_A, full_matrices=False)
             if S.sum() > tau_sqrt_mn:
-                S = shrinkage_singular_values(S.astype(np.float64),
+                S = shrinkage_singular_values(S.astype(np.float32),
                                               tau_sqrt_mn,
                                               shrinkage_search_eps)
                 _A = np.dot(U * S, VT)
         else:
             U, S, VT = randomized_svd(_A, max_rank)
             if S.sum() > tau_sqrt_mn:
-                S = shrinkage_singular_values(S.astype(np.float64),
+                S = shrinkage_singular_values(S.astype(np.float32),
                                               tau_sqrt_mn,
                                               shrinkage_search_eps)
             _A = np.dot(U * S, VT)
@@ -147,11 +211,53 @@ def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma,
     return P_hat
 
 
+def one_bit_MC_fully_observed_approx(M, rank, gamma, lr=0.1, max_n_epochs=100,
+                                     patience=10, loss_tol=1e-4, init_std=0.01,
+                                     random_state=None, verbose=0):
+    if random_state is None:
+        rng = np.random.RandomState()
+    elif type(random_state) == np.random.RandomState:
+        rng = random_state
+    else:
+        rng = np.random.RandomState(random_state)
+
+    m, n = M.shape
+    if m > n:
+        transpose = True
+        M = M.T
+        m, n = n, m
+    else:
+        transpose = False
+    M = M.astype(np.uint8)
+
+    U = init_std * rng.randn(m, rank).astype(np.float32)
+    V = init_std * rng.randn(n, rank).astype(np.float32)
+
+    # scale U and V to ensure that the entrywise max norm constraint holds
+    UV_entrywise_max_norm = \
+        np.max([np.abs(np.dot(U, V[col])).max() for col in range(n)])
+    if UV_entrywise_max_norm > gamma:
+        fix_ratio = np.sqrt(gamma / UV_entrywise_max_norm)
+        U *= fix_ratio
+        V *= fix_ratio
+
+    U, V = \
+        one_bit_MC_fully_observed_approx_helper_adagrad(M, U, V,
+                                                        rank, gamma, lr,
+                                                        max_n_epochs,
+                                                        patience, loss_tol,
+                                                        1*verbose, 0)
+
+    if transpose:
+        U, V = V, U
+
+    return std_logistic_function(np.dot(U, V.T))
+
+
 def one_bit_MC_mod_fully_observed(M, link, link_gradient, tau, gamma,
                                   max_rank=None, opt_max_iter=2000,
                                   opt_eps=1e-6, phi=None,
-                                  shrinkage_search_eps=1e-8,
-                                  max_num_proj_iter=1000):
+                                  shrinkage_search_eps=1e-8):
     # parameters are the same as in the paper; if `max_rank` is set to None,
     # then exact SVD is used
     m = M.shape[0]
@@ -262,11 +368,12 @@ def weighted_softimpute(X, M, W, lmbda, min_value=None, max_value=None,
     return X_hat.reshape(m, n)
 
 
-def approx_doubly_weighted_trace_norm(X, M, W, n_components, lmbda,
-                                      min_value=None, max_value=None,
-                                      opt_max_iter=100, opt_eps=1e-6,
-                                      random_state=None,
-                                      trace_norm_weighting=True):
+def approx_doubly_weighted_trace_norm_unconstrained(X, M, W, n_components,
+                                                    lmbda, init_std=0.01,
+                                                    opt_max_iter=100,
+                                                    opt_eps=1e-6,
+                                                    random_state=None,
+                                                    trace_norm_weighting=True):
     m, n = X.shape
 
     if random_state is None:
@@ -284,9 +391,14 @@ def approx_doubly_weighted_trace_norm(X, M, W, n_components, lmbda,
         row_weights = np.ones(m)
         col_weights = np.ones(n)
 
-    U = rng.rand(m, n_components)
-    V = rng.rand(n, n_components)
+    sqrt_row_weights = np.sqrt(row_weights)
+    sqrt_col_weights = np.sqrt(col_weights)
+
+    U = init_std * rng.randn(m, n_components).astype(np.float32)
+    V = init_std * rng.randn(n, n_components).astype(np.float32)
     m_times_n_components = m * n_components
+
+    nnz = M.sum()
 
     def f(_UV, return_gradient=True):
         U = _UV[:m_times_n_components].reshape(m, n_components)
@@ -294,45 +406,101 @@ def approx_doubly_weighted_trace_norm(X, M, W, n_components, lmbda,
         X_hat_tmp = U.dot(V.T)
         diff = (X_hat_tmp - X) * M * np.sqrt(W)
 
-        U_weighted = np.dot(np.diag(np.sqrt(row_weights)), U)
-        V_weighted = np.dot(np.diag(np.sqrt(col_weights)), V)
+        U_weighted = U * sqrt_row_weights[:, np.newaxis]
+        V_weighted = V * sqrt_col_weights[:, np.newaxis]
 
         # by default, np.linalg.norm for matrices is Frobenius norm
         loss = (np.linalg.norm(diff)**2
                 + lmbda * (np.linalg.norm(U_weighted)**2
-                           + np.linalg.norm(V_weighted)**2)) / 2
+                           + np.linalg.norm(V_weighted)**2)) / 2 / nnz
 
         if not return_gradient:
             return loss
 
-        grad_U = np.dot(diff, V) + lmbda * U_weighted
-        grad_V = np.dot(diff.T, U) + lmbda * V_weighted
-        grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
-        return loss, grad_UV
+        U_grad = np.dot(diff, V) + lmbda * U_weighted
+        V_grad = np.dot(diff.T, U) + lmbda * V_weighted
+        UV_grad = np.concatenate([U_grad.flatten(), V_grad.flatten()])
+        UV_grad /= nnz
+        return loss, UV_grad
 
-    if min_value is not None or max_value is not None:
-        def min_max_value_proj(Z, t):
-            return np.clip(Z, min_value, max_value)
-        _UV_hat = minimize_proximal_gradient(f,
-                                             np.concatenate([U.flatten(),
-                                                             V.flatten()]),
-                                             min_max_value_proj, jac=True,
-                                             max_iter=opt_max_iter,
-                                             tol=opt_eps).x
-    else:
-        _UV_hat = \
-            minimize(f, np.concatenate([U.flatten(), V.flatten()]),
-                     method='L-BFGS-B', jac=True,
-                     options={'maxiter': opt_max_iter},
-                     tol=opt_eps).x
+    _UV_hat = \
+        minimize(f, np.concatenate([U.flatten(), V.flatten()]),
+                 method='L-BFGS-B', jac=True,
+                 options={'maxiter': opt_max_iter},
+                 tol=opt_eps).x
     U = _UV_hat[:m_times_n_components].reshape(m, n_components)
     V = _UV_hat[m_times_n_components:].reshape(n, n_components)
-    X_hat = U.dot(V.T)
-    return X_hat
+    return U.dot(V.T)
 
 
-def weighted_max_norm(X, M, W, n_components=20, opt_eps=1e-6, opt_max_iter=100,
-                      init_std=0.01, R=0.01, alpha=5, random_state=None):
+def approx_doubly_weighted_trace_norm(X, M, W, n_components,
+                                      lmbda, alpha, init_std=0.01,
+                                      max_n_epochs=500, lr=0.1, patience=10,
+                                      loss_tol=1e-6, random_state=None,
+                                      trace_norm_weighting=True):
+    if random_state is None:
+        rng = np.random.RandomState()
+    elif type(random_state) == np.random.RandomState:
+        rng = random_state
+    else:
+        rng = np.random.RandomState(random_state)
+
+    M_coo = coo_matrix(M)
+    X_rows = M_coo.row.astype(np.int64)
+    X_cols = M_coo.col.astype(np.int64)
+    X_values = np.array([X[row, col] for row, col in zip(X_rows, X_cols)],
+                        dtype=np.float32)
+    weights = np.array([W[row, col] for row, col in zip(X_rows, X_cols)],
+                       dtype=np.float32)
+
+    m, n = X.shape
+
+    if random_state is None:
+        rng = np.random.RandomState()
+    elif type(random_state) == np.random.RandomState:
+        rng = random_state
+    else:
+        rng = np.random.RandomState(random_state)
+
+    U = init_std * rng.randn(m, n_components).astype(np.float32)
+    V = init_std * rng.randn(n, n_components).astype(np.float32)
+
+    # scale U and V to ensure that the entrywise max norm constraint holds
+    UV_entrywise_max_norm = \
+        np.max([np.abs(np.dot(U, V[col])).max() for col in range(n)])
+    if UV_entrywise_max_norm > alpha:
+        fix_ratio = np.sqrt(alpha / UV_entrywise_max_norm)
+        U *= fix_ratio
+        V *= fix_ratio
+
+    if trace_norm_weighting:
+        total = float(np.sum(X))
+        row_weights = np.sum(X, axis=1) / total * m
+        col_weights = np.sum(X, axis=0) / total * n
+    else:
+        row_weights = np.ones(m)
+        col_weights = np.ones(n)
+
+    sqrt_row_weights = np.sqrt(row_weights).astype(np.float32)
+    sqrt_col_weights = np.sqrt(col_weights).astype(np.float32)
+
+    U, V = doubly_weighted_trace_norm_helper_adagrad(
+        X_rows, X_cols, X_values, weights, sqrt_row_weights, sqrt_col_weights,
+        U, V, lmbda, alpha, lr, max_n_epochs, patience, loss_tol, 0)
+    return np.dot(U, V.T)
+
+
+def weighted_max_norm(X, M, W, n_components, R, alpha, lr=0.1,
+                      max_n_epochs=500, patience=10, loss_tol=1e-6,
+                      init_std=0.01, random_state=None, verbose=0):
+    M_coo = coo_matrix(M)
+    X_rows = M_coo.row.astype(np.int64)
+    X_cols = M_coo.col.astype(np.int64)
+    X_values = np.array([X[row, col] for row, col in zip(X_rows, X_cols)],
+                        dtype=np.float32)
+    weights = np.array([W[row, col] for row, col in zip(X_rows, X_cols)],
+                       dtype=np.float32)
+
     m, n = X.shape
     sqrt_R = np.sqrt(R)
 
@@ -343,53 +511,29 @@ def weighted_max_norm(X, M, W, n_components=20, opt_eps=1e-6, opt_max_iter=100,
     else:
         rng = np.random.RandomState(random_state)
 
-    U = init_std * rng.rand(m, n_components)
-    V = init_std * rng.rand(n, n_components)
-    m_times_n_components = m * n_components
+    U = init_std * rng.randn(m, n_components).astype(np.float32)
+    V = init_std * rng.randn(n, n_components).astype(np.float32)
 
-    def f(_UV, return_gradient=True):
-        U = _UV[:m_times_n_components].reshape(m, n_components)
-        V = _UV[m_times_n_components:].reshape(n, n_components)
-        X_hat_tmp = U.dot(V.T)
-        diff = (X_hat_tmp - X) * M * np.sqrt(W)
-        loss = 1/2 * np.linalg.norm(diff)**2
+    # scale U and V to ensure that the entrywise max norm constraint holds
+    UV_entrywise_max_norm = \
+        np.max([np.abs(np.dot(U, V[col])).max() for col in range(n)])
+    if UV_entrywise_max_norm > alpha:
+        fix_ratio = np.sqrt(alpha / UV_entrywise_max_norm)
+        U *= fix_ratio
+        V *= fix_ratio
+    U = max_row_l2_norm_proj(U, sqrt_R)
+    V = max_row_l2_norm_proj(V, sqrt_R)
 
-        if not return_gradient:
-            return loss
-
-        grad_U = np.dot(diff, V)
-        grad_V = np.dot(U.T, diff).T
-        grad_UV = np.concatenate([grad_U.flatten(), grad_V.flatten()])
-        return loss, grad_UV
-
-    def prox(_UV, t):
-        U_tmp = _UV[:m_times_n_components].reshape(m, n_components)
-        V_tmp = _UV[m_times_n_components:].reshape(n, n_components)
-        tmp_norm_inf = np.max(np.abs(U_tmp.dot(V_tmp.T)))
-        if tmp_norm_inf > alpha:
-            U_tmp = U_tmp * np.sqrt(alpha) / np.sqrt(tmp_norm_inf)
-            V_tmp = V_tmp * np.sqrt(alpha) / np.sqrt(tmp_norm_inf)
-        U = max_row_l2_norm_proj(U_tmp, sqrt_R)
-        V = max_row_l2_norm_proj(V_tmp, sqrt_R)
-        prox_UV = np.concatenate([U.flatten(), V.flatten()])
-        return prox_UV
-
-    _UV_hat = \
-        minimize_proximal_gradient(f,
-                                   np.concatenate([U.flatten(),
-                                                   V.flatten()]),
-                                   prox, jac=True, max_iter=opt_max_iter,
-                                   tol=opt_eps).x
-    U = _UV_hat[:m_times_n_components].reshape(m, n_components)
-    V = _UV_hat[m_times_n_components:].reshape(n, n_components)
-    X_hat = U.dot(V.T)
-    return X_hat
+    U, V = weighted_max_norm_helper_adagrad(X_rows, X_cols, X_values, weights,
+                                            U, V, sqrt_R, alpha, lr,
+                                            max_n_epochs, patience, loss_tol,
+                                            verbose)
+    return np.dot(U, V.T)
 
 
 def max_row_l2_norm_proj(U, threshold):
-    n, k = U.shape
-    for i in range(n):
-        row_l2_norm = np.linalg.norm(U[i])
+    for u, row in enumerate(U):
+        row_l2_norm = np.linalg.norm(row)
         if row_l2_norm > threshold:
-            U[i] = U[i] / row_l2_norm * threshold
+            U[u] = row / row_l2_norm * threshold
     return U

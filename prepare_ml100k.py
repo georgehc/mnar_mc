@@ -12,9 +12,9 @@ Data for the 10 splits are Surprise-compatible and are saved in the folders:
     ...
     ml-100k/9/
 
-Per folder, we output "observed_X.txt" (train) and "test_X.txt" (test).
+Per folder, we output "X_observed.txt" (train) and "X_test.txt" (test).
 
-Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (weima@cmu.edu)
+Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (wei.w.ma@polyu.edu.hk)
 """
 import csv
 import numpy as np
@@ -75,7 +75,7 @@ for idx in range(10):
 
     os.makedirs(os.path.join(output_dir, str(idx)), exist_ok=True)
 
-    train_filename = os.path.join(output_dir, str(idx), 'observed_X.txt')
+    train_filename = os.path.join(output_dir, str(idx), 'X_observed.txt')
     train_matrix = np.zeros((num_users, num_items))
     for u, i, r in reindexed_ratings[train_mask]:
         train_matrix[int(u), int(i)] = r
@@ -85,7 +85,7 @@ for idx in range(10):
             lines.append("%d\t%d\t%f" % (u, i, r))
         f.write("\n".join(lines))
 
-    test_filename = os.path.join(output_dir, str(idx), 'test_X.txt')
+    test_filename = os.path.join(output_dir, str(idx), 'X_test.txt')
     test_matrix = np.zeros((num_users, num_items))
     for u, i, r in reindexed_ratings[test_mask]:
         test_matrix[int(u), int(i)] = r

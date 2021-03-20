@@ -76,7 +76,7 @@ class SoftImpute_ALS:
         while((thresh < ratio) and (itr < maxit)):
             if verbose:
                 print("=== Starting Iteration " + str(itr) + " ===")
-            t0 = time.clock()
+            t0 = time.time()
             itr = itr + 1
             self._U_old[:, :] = self._U
             self._V_old[:, :] = self._V
@@ -107,7 +107,7 @@ class SoftImpute_ALS:
             self._Dsq[:, :] = np.diag(np.sqrt(d))
             self._A[:, :] = np.dot(self._U, self._Dsq)
 
-            t1 = time.clock()
+            t1 = time.time()
             ratio = self._frob()
             cost = self._compute_cost()
 
