@@ -182,7 +182,7 @@ class WeightedSVD(AlgoBase):
         if not self.biased:
             global_mean = 0
 
-        sqrt_weights = np.sqrt(self.weights_sparse)
+        weights_sparse = self.weights_sparse
 
         for current_epoch in range(self.n_epochs):
             if self.verbose:
@@ -194,7 +194,7 @@ class WeightedSVD(AlgoBase):
                 for f in range(self.n_factors):
                     dot += qi[i, f] * pu[u, f]
                 err = (r - (global_mean + bu[u] + bi[i] + dot)) \
-                    * sqrt_weights[u, i]
+                    * weights_sparse[u, i]
 
                 # update biases
                 if self.biased:
@@ -381,7 +381,7 @@ class WeightedSVDpp(AlgoBase):
                         (trainset.n_items, self.n_factors))
         u_impl_fdb = np.zeros(self.n_factors, np.double)
 
-        sqrt_weights = np.sqrt(self.weights_sparse)
+        weights_sparse = self.weights_sparse
 
         for current_epoch in range(self.n_epochs):
             if self.verbose:
@@ -404,7 +404,7 @@ class WeightedSVDpp(AlgoBase):
                     dot += qi[i, f] * (pu[u, f] + u_impl_fdb[f])
 
                 err = (r - (global_mean + bu[u] + bi[i] + dot)) \
-                    * sqrt_weights[u, i]
+                    * weights_sparse[u, i]
 
                 # update biases
                 bu[u] += lr_bu * (err - reg_bu * bu[u])
