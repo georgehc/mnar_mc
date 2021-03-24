@@ -2,7 +2,7 @@
 
 This code reproduces results from our NeurIPS 2019 paper "Missing Not at Random in Matrix Completion: The Effectiveness of Estimating Missingness Probabilities under a Low Nuclear Norm Assumption".
 
-Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (weima@cmu.edu)
+Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (wei.w.ma@polyu.edu.hk)
 
 We have also included code by some other authors, namely:
 
@@ -15,8 +15,9 @@ We tested this code using Anaconda Python 3.7 in a Linux environment (Ubuntu 18.
 
 - surprise (install using `pip install -U surprise`)
 - copt (install using `pip install -U copt`)
+- hnswlib (install using `pip install hnswlib`)
 
-We modified Surprise's SVD and SVDpp to allow for weighted entries, and we also have a helper proximal operator coded in cython; these require cython compilation:
+We modified Surprise's SVD and SVDpp to allow for weighted entries, and we also have helper functions coded in cython; these require cython compilation:
 
 ```
 python setup_mnar_mc_helpers.py build_ext --inplace

@@ -126,7 +126,7 @@ param_grids = {
                      'verbose': [False]},
     }
 log_reg_grid = {
-        'log_reg_min_prob': [.05]
+        'min_prob': [.05]
     }
 one_bit_mc_grid = {
         'propensity_scores': ['1bitmc'],
