@@ -1,6 +1,6 @@
 # Debiasing matrix completion via first estimating missingness probabilities via matrix completion
 
-This code reproduces results from our NeurIPS 2019 paper "Missing Not at Random in Matrix Completion: The Effectiveness of Estimating Missingness Probabilities under a Low Nuclear Norm Assumption".
+This code accompanies our NeurIPS 2019 paper "Missing Not at Random in Matrix Completion: The Effectiveness of Estimating Missingness Probabilities under a Low Nuclear Norm Assumption".
 
 Authors: George H. Chen (georgechen@cmu.edu), Wei Ma (wei.w.ma@polyu.edu.hk)
 

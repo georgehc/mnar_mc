@@ -133,7 +133,7 @@ one_bit_mc_grid = {
         'one_bit_mc_max_rank': [40],
         'one_bit_mc_tau': [10., 20.],
         'one_bit_mc_approx_lr': [0.1],  # only needed for approx
-        'one_bit_mc_gamma': [3],
+        'one_bit_mc_gamma': [3, 1.5, 0],
         'approx': [True]
     }
 one_bit_mc_mod_grid = {

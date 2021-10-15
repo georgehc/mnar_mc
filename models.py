@@ -466,7 +466,7 @@ def compute_and_save_propensity_scores_1bitmc(M, one_bit_mc_tau,
     m, n = M.shape
     while True:
         memoize_hash = hashlib.sha256(M.data.tobytes())
-        if approx:
+        if one_bit_mc_gamma > 0 and approx:
             effective_rank = \
                 int(min(np.floor((one_bit_mc_tau / one_bit_mc_gamma)**2),
                         one_bit_mc_max_rank))
@@ -482,7 +482,11 @@ def compute_and_save_propensity_scores_1bitmc(M, one_bit_mc_tau,
                                       + '.txt')
         if not os.path.isfile(cache_filename):
             os.makedirs(cache_dir, exist_ok=True)
-            if approx:
+            if one_bit_mc_gamma == 0:
+                tic = time.time()
+                P_hat = 0.5*np.ones((m, n))
+                elapsed = time.time() - tic
+            elif approx:
                 tic = time.time()
                 P_hat = \
                     one_bit_MC_fully_observed_approx(

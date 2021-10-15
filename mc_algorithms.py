@@ -157,7 +157,7 @@ def grad_mod_logistic_function(x, gamma, one_minus_logistic_gamma):
 
 def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma,
                               max_rank=None, opt_max_iter=2000,
-                              opt_eps=1e-6, shrinkage_search_eps=1e-8):
+                              opt_eps=1e-6):
     # parameters are the same as in the paper; if `max_rank` is set to None,
     # then exact SVD is used
     m = M.shape[0]
@@ -171,15 +171,13 @@ def one_bit_MC_fully_observed(M, link, link_gradient, tau, gamma,
             U, S, VT = svd(_A, full_matrices=False)
             if S.sum() > tau_sqrt_mn:
                 S = shrinkage_singular_values(S.astype(np.float32),
-                                              tau_sqrt_mn,
-                                              shrinkage_search_eps)
+                                              tau_sqrt_mn)
                 _A = np.dot(U * S, VT)
         else:
             U, S, VT = randomized_svd(_A, max_rank)
             if S.sum() > tau_sqrt_mn:
                 S = shrinkage_singular_values(S.astype(np.float32),
-                                              tau_sqrt_mn,
-                                              shrinkage_search_eps)
+                                              tau_sqrt_mn)
             _A = np.dot(U * S, VT)
         return _A.flatten()
 
@@ -256,8 +254,7 @@ def one_bit_MC_fully_observed_approx(M, rank, gamma, lr=0.1, max_n_epochs=100,
 
 def one_bit_MC_mod_fully_observed(M, link, link_gradient, tau, gamma,
                                   max_rank=None, opt_max_iter=2000,
-                                  opt_eps=1e-6, phi=None,
-                                  shrinkage_search_eps=1e-8):
+                                  opt_eps=1e-6, phi=None):
     # parameters are the same as in the paper; if `max_rank` is set to None,
     # then exact SVD is used
     m = M.shape[0]
@@ -273,16 +270,14 @@ def one_bit_MC_mod_fully_observed(M, link, link_gradient, tau, gamma,
         if max_rank is None:
             U, S, VT = svd(_A, full_matrices=False)
             if S.sum() > tau_sqrt_mn:
-                S = shrinkage_singular_values(S.astype(np.float64),
-                                              tau_sqrt_mn,
-                                              shrinkage_search_eps)
+                S = shrinkage_singular_values(S.astype(np.float32),
+                                              tau_sqrt_mn)
                 _A = np.dot(U * S, VT)
         else:
             U, S, VT = randomized_svd(_A, max_rank)
             if S.sum() > tau_sqrt_mn:
-                S = shrinkage_singular_values(S.astype(np.float64),
-                                              tau_sqrt_mn,
-                                              shrinkage_search_eps)
+                S = shrinkage_singular_values(S.astype(np.float32),
+                                              tau_sqrt_mn)
             _A = np.dot(U * S, VT)
         return _A.flatten()
 
