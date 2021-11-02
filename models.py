@@ -482,7 +482,7 @@ def compute_and_save_propensity_scores_1bitmc(M, one_bit_mc_tau,
                                       + '.txt')
         if not os.path.isfile(cache_filename):
             os.makedirs(cache_dir, exist_ok=True)
-            if one_bit_mc_gamma == 0:
+            if one_bit_mc_tau == 0 or one_bit_mc_gamma == 0:
                 tic = time.time()
                 P_hat = 0.5*np.ones((m, n))
                 elapsed = time.time() - tic
